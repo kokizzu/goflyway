@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -192,9 +191,13 @@ func main() {
 			HostPolicy: autocert.HostWhitelist(httpsProxy),
 		}
 		s := &http.Server{
-			Addr:         addr,
-			TLSConfig:    m.TLSConfig(),
-			TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+			Addr:      addr,
+			TLSConfig: m.TLSConfig(),
+		}
+		for i, p := range s.TLSConfig.NextProtos {
+			if p == "h2" {
+				s.TLSConfig.NextProtos[i] = "h2-disabled"
+			}
 		}
 		s.Handler = &connector{}
 		v.Eprint(s.ListenAndServeTLS("", ""))
@@ -240,7 +243,7 @@ func (c *connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// we are inside GFW and should pass data to upstream
 	host := r.URL.Host
-	v.VVprint(r.URL)
+	v.VVprint(r.URL.Host)
 
 	if !regexp.MustCompile(`:\d+$`).MatchString(host) {
 		host += ":443"
@@ -261,17 +264,23 @@ func (c *connector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyClient.Write([]byte("HTTP/1.1 101 Switching Protocols"))
+	proxyClient.Write([]byte("HTTP/1.0 200 Connection Established\r\n\r\n"))
 
 	go func() {
-		if _, err := io.Copy(proxyClient, up); err != nil {
-			v.Eprint(err)
-		}
-	}()
-
-	go func() {
+		wait := make(chan bool)
+		go func() {
+			if _, err := io.Copy(proxyClient, up); err != nil {
+				v.Eprint(err)
+			}
+			wait <- true
+		}()
 		if _, err := io.Copy(up, proxyClient); err != nil {
 			v.Eprint(err)
 		}
+		select {
+		case <-wait:
+		}
+		proxyClient.Close()
+		up.Close()
 	}()
 }
